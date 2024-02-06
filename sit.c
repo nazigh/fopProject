@@ -18,6 +18,10 @@
 #define debug(x) printf("%s", x);
 #define MAX_FILENAME_LENGTH 1000
 #define MAX_LINE_LENGTH 1000
+#define ANSI_COLOR_RED "\x1b[31m"
+#define ANSI_COLOR_GREEN "\x1b[32m"
+#define ANSI_COLOR_RESET "\x1b[0m"
+
 void print_command(int argc, char *const argv[]);
 int run_init(int argc, char *const argv[]);
 int create_configs(int argc, char *const argv[]);
@@ -42,7 +46,7 @@ int run_commit(int argc, char *const argv[]);
 // int run_checkout(int argc, char *const argv[]);
 // int find_file_last_change_before_commit(char *filepath, int commit_ID);
 // int checkout_file(char *filepath, int commit_ID);
-
+int check = 0;
 void print_command(int argc, char *const argv[]) {
   for (int i = 0; i < argc; i++) {
     fprintf(stdout, "%s ", argv[i]);
@@ -1931,6 +1935,8 @@ int run_checkout(const char *target) {
                          "/Users/nazaninqaffari/desktop/fop");
               printf("Checkout successful!\n");
               update_latest_commit(atoi(target) + 1);
+              if (check)
+                write_commit_number(commit_number + 2);
               return 0;
             }
             // Copy all files from the commit folder to fop (excluding
@@ -1961,6 +1967,9 @@ int run_checkout(const char *target) {
           snprintf(thisfolder, sizeof(thisfolder), "%s/%s", branch_path, max);
           copy_files(thisfolder, "/Users/nazaninqaffari/desktop/fop");
           printf("Checkout successful!\n");
+          update_latest_commit(atoi(target) + 1);
+          if (check)
+            write_commit_number(commit_number + 2);
         }
       }
     }
@@ -2109,13 +2118,630 @@ int run_status() {
 
   return 0;
 }
+int commit_folder_exists(const char *commit_id) {
+  DIR *dir;
+  struct dirent *entry;
+  char branches_path[MAX_FILENAME_LENGTH];
+  snprintf(branches_path, sizeof(branches_path), ".sit/branches");
+
+  if ((dir = opendir(branches_path)) != NULL) {
+    while ((entry = readdir(dir)) != NULL) {
+      if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 &&
+          strcmp(entry->d_name, "..") != 0) {
+        char commit_folder_path[MAX_FILENAME_LENGTH];
+        snprintf(commit_folder_path, sizeof(commit_folder_path), "%s/%s",
+                 branches_path, entry->d_name);
+
+        if (access(commit_folder_path, F_OK) != -1) {
+          char commit_id_path[MAX_FILENAME_LENGTH];
+          snprintf(commit_id_path, sizeof(commit_id_path), "%s/%s",
+                   commit_folder_path, commit_id);
+          if (access(commit_id_path, F_OK) != -1) {
+            closedir(dir);
+            return 1; // Commit folder found in this branch
+          }
+        }
+      }
+    }
+    closedir(dir);
+  }
+  return 0; // Commit folder not found in any branch
+}
+
+int run_revert(int argc, char *argv[]) {
+  if (argc < 3) {
+    fprintf(stderr, "Usage: %s revert [-m \"message\"] <commit-id>\n", argv[0]);
+    return 1;
+  }
+  if (argc < 3) {
+    fprintf(stderr, "Usage: %s revert [-m \"message\"] [-n] [<commit-id>]\n",
+            argv[0]);
+    return 1;
+  }
+
+  const char *commit_id = "";
+  const char *message = ""; // Default message if not provided
+
+  int use_default_message = 1; // Assume using default message
+  int only_checkout = 0; // Flag to indicate whether only checkout is needed
+
+  // Check for optional flags
+  for (int i = 2; i < argc; i++) {
+    if (strcmp(argv[i], "-m") == 0) {
+      message = argv[i + 1];
+      use_default_message = 0;
+      i++;
+    } else if (strcmp(argv[i], "-n") == 0) {
+      commit_id = argv[i + 1];
+      only_checkout = 1;
+      break;
+    } else {
+      commit_id = argv[i];
+    }
+  }
+
+  // Check if the .sit folder exists
+  char sit_folder_path[MAX_FILENAME_LENGTH];
+  snprintf(sit_folder_path, sizeof(sit_folder_path), ".sit");
+  if (access(sit_folder_path, F_OK) == -1) {
+    fprintf(stderr, "Error: .sit not found. Did you run 'sit init'?\n");
+    return 1;
+  }
+  if (only_checkout) {
+    if (commit_id == NULL) {
+      // Read the commit number from commit_number.txt
+      int last_commit_number = read_commit_number();
+      last_commit_number--;
+
+      // Generate commit id from the commit number
+      char commit_id_from_txt[100];
+      snprintf(commit_id_from_txt, sizeof(commit_id_from_txt), "%d",
+               last_commit_number);
+
+      // Run checkout with the generated commit id
+      return run_checkout(commit_id_from_txt);
+    } else {
+      // Run checkout with the provided commit id
+      return run_checkout(commit_id);
+    }
+  }
+  // Check if the specified commit folder exists in any branch
+  DIR *dir = opendir(".sit/branches");
+  struct dirent *entry;
+  char branches_path[MAX_FILENAME_LENGTH];
+  snprintf(branches_path, sizeof(branches_path), ".sit/branches");
+  char commit_id_path[MAX_FILENAME_LENGTH];
+  char commit_new_path[MAX_FILENAME_LENGTH];
+  char branchname[100];
+  if ((dir = opendir(branches_path)) != NULL) {
+    while ((entry = readdir(dir)) != NULL) {
+      if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 &&
+          strcmp(entry->d_name, "..") != 0) {
+        strcpy(branchname, entry->d_name);
+        char commit_folder_path[MAX_FILENAME_LENGTH];
+        snprintf(commit_folder_path, sizeof(commit_folder_path), "%s/%s",
+                 branches_path, entry->d_name);
+
+        if (access(commit_folder_path, F_OK) != -1) {
+          snprintf(commit_id_path, sizeof(commit_id_path), "%s/%s",
+                   commit_folder_path, commit_id);
+          snprintf(commit_new_path, sizeof(commit_new_path), "%s",
+                   commit_folder_path);
+          if (access(commit_id_path, F_OK) != -1) {
+            closedir(dir);
+
+            // Continue with creating a new commit folder for the revert
+            // Get the commit number for the new commit
+            int new_commit_number = read_commit_number();
+            // write_commit_number(new_commit_number + 1);
+            //  Create the new commit folder
+            char new_commit_number_str[1000];
+            snprintf(new_commit_number_str, sizeof(new_commit_number_str),
+                     "%s/%d", commit_new_path, new_commit_number);
+            if (mkdir(new_commit_number_str, 0755) != 0) {
+              fprintf(stderr, "Error creating new commit folder.\n");
+              return 1;
+            }
+
+            // Copy files from the specified commit folder to the new commit
+            // folder
+            copy_files(commit_id_path, new_commit_number_str);
+
+            // Update the info.txt file in the new commit folder
+            if (use_default_message) {
+              // If using default message, extract the message from the commit
+              // folder
+              char info_path[MAX_FILENAME_LENGTH];
+              snprintf(info_path, sizeof(info_path), "%s/info.txt",
+                       commit_id_path);
+              FILE *info_file = fopen(info_path, "r");
+              if (info_file != NULL) {
+                char line[MAX_FILENAME_LENGTH];
+                while (fgets(line, sizeof(line), info_file) != NULL) {
+                  if (strstr(line, "Commit Message:") != NULL) {
+                    // Found the line with the commit message
+                    const char *message_prefix = "Commit Message: ";
+                    message = line + strlen(message_prefix);
+                    break;
+                  }
+                }
+                fclose(info_file);
+              }
+            }
+
+            update_file_info(new_commit_number_str, new_commit_number,
+                             count_files(new_commit_number_str), branchname,
+                             "Nazi", message);
+
+            // Update commit number and latest commit number
+
+            printf("Revert was successful!\n");
+            check = 1;
+            // Now perform the checkout
+            return run_checkout(commit_id);
+          }
+        }
+      }
+    }
+  } else {
+    fprintf(stderr, "Error: Commit folder '%s' not found.\n", commit_id);
+    return 1;
+  }
+  fprintf(stderr, "Error: Commit folder '%s' not found.\n", commit_id);
+  return 1;
+}
+int run_revert2(int argc, char *argv[]) {
+  if (argc < 3) {
+    fprintf(stderr, "Usage: %s revert [-m \"message\"] <HEAD-X>\n", argv[0]);
+    return 1;
+  }
+
+  const char *commit_id = "";
+  const char *message = ""; // Default message if not provided
+
+  int use_default_message = 1; // Assume using default message
+
+  // Check for optional message flag
+  for (int i = 2; i < argc; i++) {
+    if (strcmp(argv[i], "-m") == 0) {
+      message = argv[i + 1];
+      use_default_message = 0;
+      i++;
+    } else {
+      commit_id = argv[i];
+    }
+  }
+  if (strstr(commit_id, "HEAD") != NULL) {
+    // Read the commit number from commit_number.txt
+    int last_commit_number = read_commit_number();
+    last_commit_number--;
+    int N;
+    // Extract the number N from HEAD-(N)
+    if (use_default_message == 0) {
+      N = atoi(strstr(argv[4], "HEAD-") + strlen("HEAD-"));
+    } else {
+      N = atoi(strstr(argv[2], "HEAD-") + strlen("HEAD-"));
+    }
+    // Calculate the target commit number
+    int target_commit_number = last_commit_number - N;
+
+    // Create a buffer to hold the string representation of target_commit_number
+    char target_commit_str[100];
+    snprintf(target_commit_str, sizeof(target_commit_str), "%d",
+             target_commit_number);
+
+    // Set commit_id using the buffer
+    commit_id = strdup(target_commit_str);
+  }
+  // Check if the .sit folder exists
+  char sit_folder_path[MAX_FILENAME_LENGTH];
+  snprintf(sit_folder_path, sizeof(sit_folder_path), ".sit");
+  if (access(sit_folder_path, F_OK) == -1) {
+    fprintf(stderr, "Error: .sit not found. Did you run 'sit init'?\n");
+    return 1;
+  }
+
+  // Check if the specified commit folder exists in any branch
+  DIR *dir = opendir(".sit/branches");
+  struct dirent *entry;
+  char branches_path[MAX_FILENAME_LENGTH];
+  snprintf(branches_path, sizeof(branches_path), ".sit/branches");
+  char commit_id_path[MAX_FILENAME_LENGTH];
+  char commit_new_path[MAX_FILENAME_LENGTH];
+  char branchname[100];
+  if ((dir = opendir(branches_path)) != NULL) {
+    while ((entry = readdir(dir)) != NULL) {
+      if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 &&
+          strcmp(entry->d_name, "..") != 0) {
+        strcpy(branchname, entry->d_name);
+        char commit_folder_path[MAX_FILENAME_LENGTH];
+        snprintf(commit_folder_path, sizeof(commit_folder_path), "%s/%s",
+                 branches_path, entry->d_name);
+
+        if (access(commit_folder_path, F_OK) != -1) {
+          snprintf(commit_id_path, sizeof(commit_id_path), "%s/%s",
+                   commit_folder_path, commit_id);
+          snprintf(commit_new_path, sizeof(commit_new_path), "%s",
+                   commit_folder_path);
+          if (access(commit_id_path, F_OK) != -1) {
+            closedir(dir);
+
+            // Continue with creating a new commit folder for the revert
+            // Get the commit number for the new commit
+            int new_commit_number = read_commit_number();
+            // write_commit_number(new_commit_number + 1);
+            //  Create the new commit folder
+            char new_commit_number_str[1000];
+            snprintf(new_commit_number_str, sizeof(new_commit_number_str),
+                     "%s/%d", commit_new_path, new_commit_number);
+            if (mkdir(new_commit_number_str, 0755) != 0) {
+              fprintf(stderr, "Error creating new commit folder.\n");
+              return 1;
+            }
+
+            // Copy files from the specified commit folder to the new commit
+            // folder
+            copy_files(commit_id_path, new_commit_number_str);
+
+            // Update the info.txt file in the new commit folder
+            if (use_default_message) {
+              // If using default message, extract the message from the commit
+              // folder
+              char info_path[MAX_FILENAME_LENGTH];
+              snprintf(info_path, sizeof(info_path), "%s/info.txt",
+                       commit_id_path);
+              FILE *info_file = fopen(info_path, "r");
+              if (info_file != NULL) {
+                char line[MAX_FILENAME_LENGTH];
+                while (fgets(line, sizeof(line), info_file) != NULL) {
+                  if (strstr(line, "Commit Message:") != NULL) {
+                    // Found the line with the commit message
+                    const char *message_prefix = "Commit Message: ";
+                    message = line + strlen(message_prefix);
+                    break;
+                  }
+                }
+                fclose(info_file);
+              }
+            }
+
+            update_file_info(new_commit_number_str, new_commit_number,
+                             count_files(new_commit_number_str), branchname,
+                             "Nazi", message);
+
+            // Update commit number and latest commit number
+
+            printf("Revert was successful!\n");
+            check = 1;
+            // Now perform the checkout
+            return run_checkout(commit_id);
+          }
+        }
+      }
+    }
+  } else {
+    fprintf(stderr, "Error: Commit folder '%s' not found.\n", commit_id);
+    return 1;
+  }
+  fprintf(stderr, "Error: Commit folder '%s' not found.\n", commit_id);
+  return 1;
+}
+// Function to get the author from config file
+void get_author(char *author) {
+  char config_path[MAX_FILENAME_LENGTH];
+  snprintf(config_path, sizeof(config_path), ".sit/config/%sconfig.txt",
+           (access(".sit/config/localconfig.txt", F_OK) == 0) ? "local"
+                                                              : "global");
+
+  FILE *config_file = fopen(config_path, "r");
+  if (config_file == NULL) {
+    fprintf(stderr, "Error opening config file.\n");
+    exit(EXIT_FAILURE);
+  }
+
+  // Read the first two lines from the config file
+  if (fgets(author, MAX_FILENAME_LENGTH, config_file) == NULL) {
+    fprintf(stderr, "Error reading author name from config file.\n");
+    fclose(config_file);
+    exit(EXIT_FAILURE);
+  }
+
+  // Remove the newline character at the end, if present
+  size_t len = strlen(author);
+  if (len > 0 && author[len - 1] == '\n') {
+    author[len - 1] = '\0';
+  }
+
+  // Read the second line (email)
+  char email[MAX_FILENAME_LENGTH];
+  if (fgets(email, MAX_FILENAME_LENGTH, config_file) == NULL) {
+    fprintf(stderr, "Error reading author email from config file.\n");
+    fclose(config_file);
+    exit(EXIT_FAILURE);
+  }
+
+  // Remove the newline character at the end, if present
+  len = strlen(email);
+  if (len > 0 && email[len - 1] == '\n') {
+    email[len - 1] = '\0';
+  }
+
+  // Concatenate name and email into the author string
+  snprintf(author, MAX_FILENAME_LENGTH, "%s <%s>", author, email);
+  // Close the config file
+  fclose(config_file);
+}
+
+void get_current_timestamp(char *timestamp) {
+  time_t rawtime;
+  struct tm *timeinfo;
+  time(&rawtime);
+  timeinfo = localtime(&rawtime);
+  strftime(timestamp, MAX_FILENAME_LENGTH, "%a %b %d %H:%M:%S %Y", timeinfo);
+}
+int run_tag(int argc, char *argv[]) {
+  if (argc < 4 || argc > 9) {
+    fprintf(
+        stderr,
+        "Usage: %s tag -a <tag-name> [-m <message>] [-c <commit-id>] [-f]\n",
+        argv[0]);
+    return 1;
+  }
+
+  char *tag_name = NULL;
+  char *message = NULL;
+  char *commit_id = NULL;
+  int force_flag = 0;
+
+  // Parse command-line arguments
+  for (int i = 2; i < argc; i++) {
+    if (strcmp(argv[i], "-a") == 0) {
+      tag_name = argv[i + 1];
+      i++;
+    } else if (strcmp(argv[i], "-m") == 0) {
+      message = argv[i + 1];
+      i++;
+    } else if (strcmp(argv[i], "-c") == 0) {
+      commit_id = argv[i + 1];
+      i++;
+    } else if (strcmp(argv[i], "-f") == 0) {
+      force_flag = 1;
+    }
+  }
+
+  if (tag_name == NULL) {
+    fprintf(stderr, "Error: Tag name is required.\n");
+    return 1;
+  }
+
+  // Check if .sit/tags folder exists, create if not
+  char tags_folder_path[MAX_FILENAME_LENGTH];
+  snprintf(tags_folder_path, sizeof(tags_folder_path), ".sit/tags");
+  if (access(tags_folder_path, F_OK) == -1) {
+    if (mkdir(tags_folder_path, 0755) != 0) {
+      fprintf(stderr, "Error creating tags folder.\n");
+      return 1;
+    }
+  }
+
+  // Determine the commit ID
+  if (commit_id == NULL) {
+    // Read the commit number from commit_number.txt
+    int last_commit_number = read_commit_number();
+    last_commit_number--;
+
+    // Generate commit id from the commit number
+    char commit_id_buffer[100];
+    snprintf(commit_id_buffer, sizeof(commit_id_buffer), "%d",
+             last_commit_number);
+    commit_id = strdup(commit_id_buffer);
+  }
+
+  // Create tag information
+  char tag_info[MAX_FILENAME_LENGTH];
+  snprintf(tag_info, sizeof(tag_info), "%s\ncommit %s\n", tag_name, commit_id);
+
+  // Add author information
+  char author_info[MAX_FILENAME_LENGTH];
+  get_author(author_info);
+  strcat(tag_info, "author: ");
+  strcat(tag_info, author_info);
+  strcat(tag_info, "\n");
+  // Add timestamp
+  char timestamp_info[MAX_FILENAME_LENGTH];
+  get_current_timestamp(timestamp_info);
+  strcat(tag_info, "Date: ");
+  strcat(tag_info, timestamp_info);
+  strcat(tag_info, "\n");
+
+  // Add message if provided
+  if (message != NULL) {
+    strcat(tag_info, "Message: ");
+    strcat(tag_info, message);
+    strcat(tag_info, "\n");
+  }
+
+  // Create tag file
+  char tag_file_path[MAX_FILENAME_LENGTH];
+  snprintf(tag_file_path, sizeof(tag_file_path), "%s/%s.txt", tags_folder_path,
+           tag_name);
+
+  // Check if tag file already exists (and force flag not set)
+  if (access(tag_file_path, F_OK) == 0 && !force_flag) {
+    fprintf(stderr,
+            "Error: Tag '%s' already exists. Use -f to force overwrite.\n",
+            tag_name);
+    return 1;
+  }
+
+  FILE *tag_file = fopen(tag_file_path, "w");
+  if (tag_file == NULL) {
+    fprintf(stderr, "Error creating tag file.\n");
+    return 1;
+  }
+
+  // Write tag information to the file
+  fprintf(tag_file, "%s", tag_info);
+
+  // Close the file
+  fclose(tag_file);
+  printf("Tag '%s' created successfully.\n", tag_name);
+  return 0;
+}
+int compare_strings(const void *a, const void *b) {
+  return strcmp(*(const char **)a, *(const char **)b);
+}
+void list_tags() {
+  char tags_folder_path[MAX_FILENAME_LENGTH];
+  snprintf(tags_folder_path, sizeof(tags_folder_path), ".sit/tags");
+  // Check if tags folder exists
+  if (access(tags_folder_path, F_OK) == -1) {
+    fprintf(stderr, "No tags found.\n");
+    return;
+  }
+
+  // Open the tags folder
+  DIR *dir = opendir(tags_folder_path);
+  if (dir == NULL) {
+    fprintf(stderr, "Error opening tags folder.\n");
+    return;
+  }
+
+  // Read tags from the directory and store in an array
+  struct dirent *entry;
+  char tag_file_path[MAX_FILENAME_LENGTH];
+  char *tag_names[100]; // Assuming there are at most 100 tags
+  int num_tags = 0;
+
+  while ((entry = readdir(dir)) != NULL) {
+    // Skip entries starting with dot (.) and subdirectories
+    if (entry->d_name[0] == '.') {
+      continue;
+    }
+    // Store tag names
+    tag_names[num_tags] = strdup(entry->d_name);
+    num_tags++;
+  }
+
+  // Sort tag names alphabetically
+  qsort(tag_names, num_tags, sizeof(char *), compare_strings);
+
+  // Display tag information
+  for (int i = 0; i < num_tags; i++) {
+    snprintf(tag_file_path, sizeof(tag_file_path), "%s/%s", tags_folder_path,
+             tag_names[i]);
+
+    FILE *tag_file = fopen(tag_file_path, "r");
+    if (tag_file != NULL) {
+      char tag_info[MAX_FILENAME_LENGTH];
+      while (fgets(tag_info, sizeof(tag_info), tag_file) != NULL) {
+        printf("%s", tag_info); // Display tag information
+      }
+      fclose(tag_file);
+    }
+    free(tag_names[i]); // Free allocated memory for tag names
+  }
+  // Close the directory
+  closedir(dir);
+}
+void view_tag_info(const char *tag_name) {
+  char tags_folder_path[MAX_FILENAME_LENGTH];
+  snprintf(tags_folder_path, sizeof(tags_folder_path), ".sit/tags");
+
+  // Create the tag file path
+  char tag_file_path[MAX_FILENAME_LENGTH];
+  snprintf(tag_file_path, sizeof(tag_file_path), "%s/%s.txt", tags_folder_path,
+           tag_name);
+
+  // Check if the tag file exists
+  if (access(tag_file_path, F_OK) == 0) {
+    FILE *tag_file = fopen(tag_file_path, "r");
+    if (tag_file != NULL) {
+      char tag_info[MAX_FILENAME_LENGTH];
+      while (fgets(tag_info, sizeof(tag_info), tag_file) != NULL) {
+        printf("%s", tag_info); // Display tag information
+      }
+      fclose(tag_file);
+    } else {
+      fprintf(stderr, "Error opening tag file.\n");
+    }
+  } else {
+    fprintf(stderr, "Tag '%s' not found.\n", tag_name);
+  }
+}
+void print_colored_line(const char *line, const char *color) {
+  printf("%s%s%s", color, line, ANSI_COLOR_RESET);
+}
+int run_diff(const char *file1, const char *file2, int line1_start,
+             int line1_end, int line2_start, int line2_end) {
+  FILE *fp1, *fp2;
+  char line1[1024], line2[1024];
+  fp1 = fopen(file1, "r");
+  fp2 = fopen(file2, "r");
+  if (fp1 == NULL || fp2 == NULL) {
+    fprintf(stderr, "Error: Unable to open files.\n");
+    return 1;
+  }
+
+  // Read and compare lines
+  int line_number = 0;
+
+  // Skip lines until we reach line1_start
+  while (line_number < line1_start - 1 &&
+         fgets(line1, sizeof(line1), fp1) != NULL)
+    line_number++;
+
+  int line_number2 = 0;
+
+  // Skip lines until we reach line2_start
+  while (line_number2 < line2_start - 1 &&
+         fgets(line2, sizeof(line2), fp2) != NULL)
+    line_number2++;
+
+  while (line_number <= line1_end && line_number2 <= line2_end &&
+         fgets(line1, sizeof(line1), fp1) != NULL &&
+         fgets(line2, sizeof(line2), fp2) != NULL) {
+    line_number++;
+    line_number2++;
+
+    // Skip empty lines in file 1
+    while ((line_number <= line1_end) &&
+           (strlen(line1) == 0 || strspn(line1, " \t\n") == strlen(line1))) {
+      if (fgets(line1, sizeof(line1), fp1) == NULL)
+        break;
+      line_number++;
+    }
+
+    // Skip empty lines in file 2
+    while ((line_number2 <= line2_end) &&
+           (strlen(line2) == 0 || strspn(line2, " \t\n") == strlen(line2))) {
+      if (fgets(line2, sizeof(line2), fp2) == NULL)
+        break;
+      line_number2++;
+    }
+
+    // Compare non-empty lines
+    if (strcmp(line1, line2) != 0) {
+      printf("Difference found!\n");
+      printf("%s-%d\n", file1, line_number);
+      print_colored_line(line1, ANSI_COLOR_RED);
+      printf("%s-%d\n", file2, line_number2);
+      print_colored_line(line2, ANSI_COLOR_GREEN);
+    }
+  }
+
+  // Close files
+  fclose(fp1);
+  fclose(fp2);
+
+  return 0;
+}
 
 int main(int argc, char *argv[]) {
   if (argc < 2) {
     fprintf(stdout, "please enter a valid command.");
     return 1;
   }
-
   print_command(argc, argv);
 
   if (strcmp(argv[1], "init") == 0) {
@@ -2162,7 +2788,77 @@ int main(int argc, char *argv[]) {
   } else if (strcmp(argv[1], "status") == 0) {
     return run_status();
   } else if (strcmp(argv[1], "revert") == 0) {
-    return run_revert(argc, argv);
+    if (strstr(argv[2], "HEAD") != NULL || strstr(argv[4], "HEAD") != NULL) {
+      return run_revert2(argc, argv);
+    } else {
+      return run_revert(argc, argv);
+    }
+  } else if (strcmp(argv[1], "tag") == 0) {
+    if (argc == 2) {
+      // If only "tag" is provided, list existing tags
+      list_tags();
+    } else {
+      // Check if the user wants to view information about a specific tag
+      if (argc == 3) {
+        view_tag_info(argv[2]);
+      } else {
+        // Otherwise, create a new tag
+        return run_tag(argc, argv);
+      }
+    }
+  } else if (strcmp(argv[1], "diff") == 0) {
+    if (argc < 6) {
+      fprintf(stderr,
+              "Usage: %s diff -f <file1> <file2> -line1 <begin-end> -line2 "
+              "<begin-end>\n",
+              argv[0]);
+      return 1;
+    }
+    if (strcmp(argv[1], "diff") != 0 || strcmp(argv[2], "-f") != 0) {
+      fprintf(stderr, "Invalid command. Use 'diff -f'.\n");
+      return 1;
+    }
+    const char *file1 = argv[3];
+    const char *file2 = argv[4];
+    int line1_start = 0, line1_end = 0, line2_start = 0, line2_end = 0;
+
+    for (int i = 5; i < argc; i++) {
+      if (strcmp(argv[i], "-line1") == 0 && i + 1 < argc) {
+        if (sscanf(argv[i + 1], "%d-%d", &line1_start, &line1_end) != 2) {
+          line1_start = 0;
+          FILE *files = fopen(file1, "r");
+          char buffer[MAX_LINE_LENGTH];
+          int count = 0;
+          while (fgets(buffer, sizeof(buffer), files) != NULL) {
+            count++;
+          }
+          line1_end = count;
+          fclose(files);
+          continue;
+        }
+        i++;
+      } else if (strcmp(argv[i], "-line2") == 0 && i + 1 < argc) {
+        // printf("meow") ;
+        sscanf(argv[i + 1], "%d-%d", &line2_start, &line2_end);
+        //  printf("%d" , line2_end ) ;
+      } else {
+        if (line2_end == 0) {
+          line2_start = 0;
+          FILE *file = fopen(file2, "r");
+          char buffer[MAX_LINE_LENGTH];
+          int count = 0;
+          while (fgets(buffer, sizeof(buffer), file) != NULL) {
+            count++;
+          }
+          line2_end = count;
+          fclose(file);
+          break;
+        }
+      }
+    }
+    // printf("%d %d %d %d", line1_start, line1_end, line2_start, line2_end);
+    return run_diff(file1, file2, line1_start, line1_end, line2_start,
+                    line2_end);
   } else if (argc > 1) {
     return run_command(argv[1]);
   }
